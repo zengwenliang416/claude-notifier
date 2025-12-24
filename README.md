@@ -39,11 +39,50 @@
 
 ## 快速开始
 
+### 1. 克隆仓库
+
 ```bash
 git clone https://github.com/zengwenliang416/claude-notifier.git
 cd claude-notifier
+```
+
+### 2. 安装
+
+**默认安装**（推荐，安装到 `~/.claude/apps/`）：
+
+```bash
 make install
 ```
+
+**自定义安装路径**：
+
+```bash
+# 安装到 /Applications
+make install PREFIX=/Applications
+
+# 安装到 ~/Applications
+make install PREFIX=~/Applications
+
+# 安装到任意目录
+make install PREFIX=/your/custom/path
+```
+
+> **注意**：如果使用自定义路径，后续 Hooks 配置中的 `ClaudeNotifier` 路径也需要相应修改。
+
+### 3. 授权通知权限
+
+首次运行时，macOS 会提示授权通知权限：
+
+```bash
+# 测试运行
+~/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier
+```
+
+在弹出的对话框中点击「允许」，或前往「系统设置 → 通知 → Claude Notifier」手动开启。
+
+### 4. 配置 Claude Code Hooks
+
+详见下方 [Claude Code Hooks 配置](#claude-code-hooks-配置) 章节。
 
 ## 使用方法
 
@@ -124,24 +163,170 @@ afconvert input.mp3 output.aiff -d LEI16
 - **时长**：必须小于 30 秒
 - **安装**：使用 `-f` 参数时会自动复制到 `~/Library/Sounds/`
 
-## 与 Claude Code Hooks 集成
+## Claude Code Hooks 配置
 
-在 `~/.claude/hooks/stop-check.sh` 中添加：
+Claude Code 支持通过 Hooks 在特定事件触发时执行自定义脚本。我们使用 `Stop` hook 在 Claude 完成回答时发送通知。
+
+### 方式一：使用 settings.json 配置（推荐）
+
+编辑 Claude Code 配置文件 `~/.claude/settings.json`：
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier -t 'Claude Code' -m 'Claude 已完成回答'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**使用自定义音效**：
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier -t 'Claude Code' -m 'Claude 已完成回答' -f '$HOME/.claude/sounds/done.aiff'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 方式二：使用 Shell 脚本
+
+**Step 1**: 创建 hook 脚本
 
 ```bash
+mkdir -p ~/.claude/hooks
+cat > ~/.claude/hooks/stop.sh << 'EOF'
+#!/bin/bash
+# Claude Code Stop Hook - 任务完成时发送通知
+
+NOTIFIER="$HOME/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier"
+SOUND_FILE="$HOME/.claude/sounds/done.aiff"
+
 send_notification() {
     local title="Claude Code"
     local message="Claude 已完成回答"
-    local notifier="$HOME/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier"
-    local sound_file="$HOME/.claude/sounds/done-custom.aiff"
 
-    if [[ -x "$notifier" ]]; then
-        "$notifier" -t "$title" -m "$message" -f "$sound_file" 2>/dev/null || \
+    if [[ -x "$NOTIFIER" ]]; then
+        "$NOTIFIER" -t "$title" -m "$message" -f "$SOUND_FILE" 2>/dev/null || \
+        "$NOTIFIER" -t "$title" -m "$message" 2>/dev/null || \
         osascript -e "display notification \"$message\" with title \"$title\" sound name \"Glass\"" 2>/dev/null || true
     else
         osascript -e "display notification \"$message\" with title \"$title\" sound name \"Glass\"" 2>/dev/null || true
     fi
 }
+
+send_notification
+EOF
+
+chmod +x ~/.claude/hooks/stop.sh
+```
+
+**Step 2**: 在 settings.json 中注册 hook
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/stop.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 方式三：带任务检查的高级 Hook
+
+如果你希望在任务未完成时阻止 Claude 结束（例如 Todo 列表未清空），可以使用带检查逻辑的 hook：
+
+```bash
+cat > ~/.claude/hooks/stop-check.sh << 'EOF'
+#!/bin/bash
+set -euo pipefail
+
+NOTIFIER="$HOME/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier"
+
+send_notification() {
+    local title="Claude Code"
+    local message="Claude 已完成回答"
+
+    if [[ -x "$NOTIFIER" ]]; then
+        "$NOTIFIER" -t "$title" -m "$message" 2>/dev/null || true
+    fi
+}
+
+# 检查是否有未完成的任务
+check_todos() {
+    local todo_file="$HOME/.claude/todos.json"
+    if [[ -f "$todo_file" ]]; then
+        if grep -q '"status"[[:space:]]*:[[:space:]]*"in_progress"' "$todo_file" 2>/dev/null; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# 主逻辑
+if check_todos; then
+    send_notification
+    echo '{"decision": "approve"}'
+else
+    echo '{"decision": "block", "reason": "仍有未完成的任务"}'
+fi
+EOF
+
+chmod +x ~/.claude/hooks/stop-check.sh
+```
+
+### 创建自定义语音音效
+
+```bash
+# 创建音效目录
+mkdir -p ~/.claude/sounds
+
+# 使用 macOS TTS 生成语音
+say -v Tingting "搞定咯~" -o ~/.claude/sounds/done.aiff
+
+# 或使用其他中文语音
+say -v Meijia "任务完成" -o ~/.claude/sounds/done.aiff
+```
+
+### 验证配置
+
+```bash
+# 测试通知是否正常工作
+~/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier \
+  -t "测试" -m "通知配置成功！"
+
+# 测试带音效的通知
+~/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier \
+  -t "测试" -m "带语音的通知" -f ~/.claude/sounds/done.aiff
 ```
 
 ## 手动安装
@@ -162,10 +347,6 @@ codesign --force --deep --sign - ~/.claude/apps/ClaudeNotifier.app
 # 4. 注册到 LaunchServices
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/.claude/apps/ClaudeNotifier.app
 ```
-
-## 首次使用
-
-首次运行时，macOS 会提示授权通知权限。请在「系统设置 → 通知」中允许「Claude Notifier」发送通知。
 
 ## 技术细节
 
