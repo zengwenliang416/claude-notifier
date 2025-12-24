@@ -1,0 +1,14 @@
+# Build artifacts
+ClaudeNotifier
+*.o
+*.dSYM/
+
+# macOS
+.DS_Store
+*.app/
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
