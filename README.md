@@ -89,6 +89,7 @@ Hook 功能：
 - 发送远程推送（ntfy/Telegram/Bark，只启用一个）
 - 桌面和远程通知并行执行，不阻塞
 - **显示项目名称**：通知会显示当前项目名（如「pay 项目任务已完成」），方便多项目并行时区分
+- **点击跳转**：点击通知自动跳转到对应项目窗口（支持 Zed/VS Code/Cursor 等）
 
 ### 仅桌面通知（简化版）
 
@@ -105,7 +106,7 @@ Hook 功能：
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier -t 'Claude Code' -m 'Claude 已完成回答'"
+            "command": "/Applications/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier -t 'Claude Code' -m 'Claude 已完成回答'"
           }
         ]
       }
@@ -224,6 +225,7 @@ claude-notifier/
 | 图标机制 | App Bundle (.icns)       | AUMID + 快捷方式 (.lnk)  |
 | 音频格式 | .aiff, .wav, .caf        | 仅 .wav                  |
 | 首次运行 | 自动授权弹窗             | 需手动 `--init`          |
+| 点击跳转 | ✅ 支持（AX API + CLI）  | 🔧 开发中                |
 
 ## 自定义语音音效
 

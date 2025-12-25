@@ -1,6 +1,6 @@
 # ClaudeNotifier Makefile
 
-PREFIX ?= $(HOME)/.claude/apps
+PREFIX ?= /Applications
 APP_NAME = ClaudeNotifier
 APP_BUNDLE = $(APP_NAME).app
 INSTALL_DIR = $(PREFIX)/$(APP_BUNDLE)
@@ -77,10 +77,7 @@ help:
 	@echo ""
 	@echo "Usage:"
 	@echo "  make          Build the executable"
-	@echo "  make install  Build and install to $(PREFIX)"
+	@echo "  make install  Build and install to /Applications"
 	@echo "  make uninstall Remove installed app"
 	@echo "  make clean    Remove build artifacts"
 	@echo "  make help     Show this help"
-	@echo ""
-	@echo "Options:"
-	@echo "  PREFIX=<path> Custom install prefix (default: ~/.claude/apps)"
