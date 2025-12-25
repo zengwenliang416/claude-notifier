@@ -233,13 +233,8 @@ private func focusWindow(pid: pid_t, projectPath: String?, projectName: String?)
         return raiseResult == .success
     }
 
-    // 没有找到匹配的窗口，但至少 raise 第一个窗口
-    fputs("[DEBUG] focusWindow: no matching window found, raising first window as fallback\n", stderr)
-    if let firstWindow = windows.first {
-        let raiseResult = AXUIElementPerformAction(firstWindow, kAXRaiseAction as CFString)
-        fputs("[DEBUG] focusWindow: fallback raise result = \(raiseResult.rawValue)\n", stderr)
-        return raiseResult == .success
-    }
+    // 没有找到匹配的窗口，返回 false 让调用方尝试其他方法
+    fputs("[DEBUG] focusWindow: no matching window found, returning false to try other methods\n", stderr)
     return false
 }
 
@@ -358,6 +353,44 @@ private func findBestWindowNameViaCGAPI(pid: pid_t, projectPath: String?, projec
     return nil
 }
 
+/// 检查是否存在精确匹配项目的窗口（用于决定是否使用 CLI）
+/// 返回最高匹配分数，只有分数 >= 50 才认为是精确匹配
+/// 分数 30（父目录匹配）不足以触发 CLI，因为可能打开错误的目录
+private func windowExistsForProject(pid: pid_t, projectPath: String?, projectName: String?) -> Bool {
+    guard let windowList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+        return false
+    }
+
+    var bestScore = 0
+    var bestWindow = ""
+
+    for window in windowList {
+        guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int32, ownerPID == pid else {
+            continue
+        }
+
+        let windowName = window[kCGWindowName as String] as? String ?? ""
+        guard !windowName.isEmpty else { continue }
+
+        let score = calculateMatchScore(windowTitle: windowName, document: nil, projectPath: projectPath, projectName: projectName)
+        if score > bestScore {
+            bestScore = score
+            bestWindow = windowName
+        }
+    }
+
+    // 只有分数 >= 50 才认为是精确匹配（标题精确匹配或包含项目名）
+    // 分数 30（父目录匹配）不足以触发 CLI，避免打开错误目录
+    let threshold = 50
+    if bestScore >= threshold {
+        fputs("[DEBUG] windowExistsForProject: found matching window '\(bestWindow)' with score=\(bestScore) (>= \(threshold))\n", stderr)
+        return true
+    }
+
+    fputs("[DEBUG] windowExistsForProject: best score=\(bestScore) < \(threshold), not precise enough for CLI\n", stderr)
+    return false
+}
+
 /// 通过 AppleScript 使用窗口名 raise 指定窗口
 private func raiseWindowByName(appName: String, windowName: String) -> Bool {
     fputs("[DEBUG] raiseWindowByName: app=\(appName), window=\(windowName)\n", stderr)
@@ -405,103 +438,46 @@ private func getZedFocusedWindowTitle(pid: pid_t) -> String? {
     return title as? String
 }
 
-/// 通过 CGEvent 点击目标窗口来直接聚焦（Zed 专用）
-/// 使用 CGWindowListCopyWindowInfo 获取窗口信息，计算安全的点击位置
-private func focusZedWindowViaCGEvent(pid: pid_t, projectPath: String, projectName: String?) -> Bool {
-    fputs("[DEBUG] focusZedWindowViaCGEvent: path=\(projectPath), name=\(projectName ?? "nil")\n", stderr)
+/// 使用应用自身的 CLI 切换窗口（跨 Space 场景）
+/// 配置文件: ~/.claude/notifier-app-commands.json
+/// 格式: { "bundleId": "open command with {path} placeholder" }
+/// 例如: { "dev.zed.Zed": "zed {path}" }
+private func focusWindowViaCLI(bundleId: String, projectPath: String) -> Bool {
+    fputs("[DEBUG] focusWindowViaCLI: bundleId=\(bundleId), path=\(projectPath)\n", stderr)
 
-    guard let windowList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
-        fputs("[DEBUG] focusZedWindowViaCGEvent: failed to get window list\n", stderr)
+    // 读取配置文件
+    let configPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/notifier-app-commands.json")
+
+    guard FileManager.default.fileExists(atPath: configPath.path),
+          let data = try? Data(contentsOf: configPath),
+          let config = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+          let commandTemplate = config[bundleId] else {
+        fputs("[DEBUG] focusWindowViaCLI: no config for \(bundleId)\n", stderr)
         return false
     }
 
-    // 收集该进程的所有窗口及其匹配分数
-    var candidates: [(windowName: String, bounds: CGRect, score: Int)] = []
-    let pathComponents = projectPath.split(separator: "/").map(String.init)
+    // 替换 {path} 占位符
+    let command = commandTemplate.replacingOccurrences(of: "{path}", with: projectPath)
+    fputs("[DEBUG] focusWindowViaCLI: executing '\(command)'\n", stderr)
 
-    for window in windowList {
-        guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int32, ownerPID == pid else { continue }
-        guard let windowName = window[kCGWindowName as String] as? String, !windowName.isEmpty else { continue }
-        guard let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+    // 执行命令
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", command]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
 
-        let bounds = CGRect(
-            x: boundsDict["X"] ?? 0,
-            y: boundsDict["Y"] ?? 0,
-            width: boundsDict["Width"] ?? 0,
-            height: boundsDict["Height"] ?? 0
-        )
-
-        // 忽略太小的窗口（可能是弹出菜单等）
-        guard bounds.width > 100 && bounds.height > 100 else { continue }
-
-        // 计算匹配分数
-        var score = 0
-
-        // 精确匹配项目名
-        if let name = projectName, windowName == name {
-            score += 100
-        } else if let name = projectName, windowName.contains(name) {
-            score += 50
-        }
-
-        // 窗口名是项目路径的某个组件（父目录匹配）
-        if pathComponents.contains(windowName) {
-            score += 30
-        }
-
-        fputs("[DEBUG] focusZedWindowViaCGEvent: window '\(windowName)' bounds=\(bounds) score=\(score)\n", stderr)
-
-        if score > 0 {
-            candidates.append((windowName, bounds, score))
-        }
-    }
-
-    guard let best = candidates.max(by: { $0.score < $1.score }) else {
-        fputs("[DEBUG] focusZedWindowViaCGEvent: no matching window found\n", stderr)
+    do {
+        try process.run()
+        process.waitUntilExit()
+        let success = process.terminationStatus == 0
+        fputs("[DEBUG] focusWindowViaCLI: exit code=\(process.terminationStatus)\n", stderr)
+        return success
+    } catch {
+        fputs("[DEBUG] focusWindowViaCLI: error=\(error)\n", stderr)
         return false
     }
-
-    fputs("[DEBUG] focusZedWindowViaCGEvent: best match '\(best.windowName)' score=\(best.score)\n", stderr)
-
-    // 检查当前窗口是否已经是目标
-    if let current = getZedFocusedWindowTitle(pid: pid), current == best.windowName {
-        fputs("[DEBUG] focusZedWindowViaCGEvent: already on target window\n", stderr)
-        return true
-    }
-
-    // 计算安全的点击位置：标题栏中央（距顶部 15 像素）
-    let clickX = best.bounds.origin.x + best.bounds.width / 2
-    let clickY = best.bounds.origin.y + 15  // 标题栏区域
-
-    fputs("[DEBUG] focusZedWindowViaCGEvent: clicking at (\(clickX), \(clickY))\n", stderr)
-
-    // 创建并发送鼠标点击事件
-    let clickPoint = CGPoint(x: clickX, y: clickY)
-
-    guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: clickPoint, mouseButton: .left),
-          let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: clickPoint, mouseButton: .left) else {
-        fputs("[DEBUG] focusZedWindowViaCGEvent: failed to create CGEvent\n", stderr)
-        return false
-    }
-
-    mouseDown.post(tap: .cghidEventTap)
-    Thread.sleep(forTimeInterval: 0.05)
-    mouseUp.post(tap: .cghidEventTap)
-
-    fputs("[DEBUG] focusZedWindowViaCGEvent: click sent successfully\n", stderr)
-
-    // 验证是否成功切换
-    Thread.sleep(forTimeInterval: 0.1)
-    if let current = getZedFocusedWindowTitle(pid: pid) {
-        fputs("[DEBUG] focusZedWindowViaCGEvent: after click, current window: '\(current)'\n", stderr)
-        if current == best.windowName {
-            fputs("[DEBUG] focusZedWindowViaCGEvent: successfully focused target window\n", stderr)
-            return true
-        }
-    }
-
-    // 即使验证失败，点击可能已经生效
-    return true
 }
 
 private func focusHostApp(hostBundleId: String, projectPath: String?, projectName: String?) {
@@ -525,7 +501,7 @@ private func focusHostApp(hostBundleId: String, projectPath: String?, projectNam
     }
     fputs("[DEBUG] focusHostApp: accessibility permission granted\n", stderr)
 
-    // 方法 1: 尝试 AX API
+    // 方法 1: 尝试 AX API（对同一 Space 的窗口有效）
     for attempt in 1...2 {
         let result = focusWindow(pid: app.processIdentifier, projectPath: projectPath, projectName: projectName)
         if result {
@@ -537,12 +513,20 @@ private func focusHostApp(hostBundleId: String, projectPath: String?, projectNam
         }
     }
 
-    // 方法 2: 对于 Zed，使用 CGEvent 直接点击目标窗口
-    if hostBundleId == "dev.zed.Zed", let path = projectPath, !path.isEmpty {
-        fputs("[DEBUG] focusHostApp: AX API failed, trying Zed CGEvent click...\n", stderr)
-        if focusZedWindowViaCGEvent(pid: app.processIdentifier, projectPath: path, projectName: projectName) {
-            fputs("[DEBUG] focusHostApp: Zed CGEvent click succeeded\n", stderr)
-            return
+    // 方法 2: 使用应用 CLI 命令（跨 Space 场景，需配置）
+    // 配置文件: ~/.claude/notifier-app-commands.json
+    // 重要：只有当窗口确实存在（但在其他 Space）时才使用 CLI
+    // 避免打开不存在的项目窗口
+    if let path = projectPath, !path.isEmpty {
+        // 先检查是否存在匹配的窗口
+        if windowExistsForProject(pid: app.processIdentifier, projectPath: projectPath, projectName: projectName) {
+            fputs("[DEBUG] focusHostApp: window exists, trying CLI command...\n", stderr)
+            if focusWindowViaCLI(bundleId: hostBundleId, projectPath: path) {
+                fputs("[DEBUG] focusHostApp: CLI command succeeded\n", stderr)
+                return
+            }
+        } else {
+            fputs("[DEBUG] focusHostApp: no matching window exists, skipping CLI to avoid opening new window\n", stderr)
         }
     }
 
