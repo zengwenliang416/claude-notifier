@@ -4,7 +4,7 @@
 
 import { existsSync, readFileSync, accessSync, constants } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { join, basename } from "path";
 import { spawnSync } from "child_process";
 
 const GREEN = "\x1b[0;32m";
@@ -26,20 +26,25 @@ interface CheckResult {
   reason?: string;
 }
 
+function getProjectName(): string {
+  const cwd = process.cwd();
+  return basename(cwd);
+}
+
 function sendNotification(): void {
   const notifier = join(
     homedir(),
     ".claude/apps/ClaudeNotifier.app/Contents/MacOS/ClaudeNotifier",
   );
   const soundFile = join(homedir(), ".claude/sounds/done.aiff");
+  const projectName = getProjectName();
+  const message = `${projectName} 项目任务已完成`;
 
   try {
     accessSync(notifier, constants.X_OK);
-    spawnSync(
-      notifier,
-      ["-t", "Claude Code", "-m", "Claude 已完成回答", "-f", soundFile],
-      { stdio: "ignore" },
-    );
+    spawnSync(notifier, ["-t", "Claude Code", "-m", message, "-f", soundFile], {
+      stdio: "ignore",
+    });
   } catch {
     // ClaudeNotifier 不可用，静默跳过
   }
