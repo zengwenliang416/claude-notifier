@@ -483,7 +483,33 @@ private func focusHostApp(hostBundleId: String, projectPath: String?, projectNam
     }
     fputs("[DEBUG] focusHostApp: accessibility permission granted\n", stderr)
 
-    // 方法 1: 尝试 AX API（对同一 Space 的窗口有效）
+    // 方法 1: 使用应用 CLI 命令（跨 Space 场景最可靠）
+    // 配置文件: ~/.claude/notifier-app-commands.json
+    // 注意：CLI 优先于 AX API，因为 AX API 在其他 Space 可能返回假阳性
+    if let path = projectPath, !path.isEmpty {
+        // 获取窗口匹配信息，决定使用什么路径
+        var cliPath = path
+
+        if let matchInfo = scanWindowsViaCGAPI(pid: app.processIdentifier, projectPath: projectPath, projectName: projectName) {
+            // 如果是父目录匹配（score 30-49），使用 workspace 根路径
+            if matchInfo.score >= 30 && matchInfo.score < 50 {
+                if let workspacePath = extractWorkspacePath(windowTitle: matchInfo.windowName, projectPath: path) {
+                    fputs("[DEBUG] focusHostApp: parent directory match, using workspace path: \(workspacePath)\n", stderr)
+                    cliPath = workspacePath
+                }
+            }
+            fputs("[DEBUG] focusHostApp: window match score=\(matchInfo.score), trying CLI with path: \(cliPath)\n", stderr)
+        } else {
+            fputs("[DEBUG] focusHostApp: no matching window in current Space, trying CLI with original path...\n", stderr)
+        }
+
+        if focusWindowViaCLI(bundleId: hostBundleId, projectPath: cliPath) {
+            fputs("[DEBUG] focusHostApp: CLI command succeeded\n", stderr)
+            return
+        }
+    }
+
+    // 方法 2: 尝试 AX API（CLI 不可用时的回退）
     for attempt in 1...2 {
         let result = focusWindow(pid: app.processIdentifier, projectPath: projectPath, projectName: projectName)
         if result {
@@ -492,39 +518,6 @@ private func focusHostApp(hostBundleId: String, projectPath: String?, projectNam
         }
         if attempt < 2 {
             Thread.sleep(forTimeInterval: 0.15)
-        }
-    }
-
-    // 方法 2: 使用应用 CLI 命令（跨 Space 场景，需配置）
-    // 配置文件: ~/.claude/notifier-app-commands.json
-    // 重要：只有当窗口确实存在（但在其他 Space）时才使用 CLI
-    // 避免打开不存在的项目窗口
-    if let path = projectPath, !path.isEmpty {
-        // 获取窗口匹配信息
-        if let matchInfo = scanWindowsViaCGAPI(pid: app.processIdentifier, projectPath: projectPath, projectName: projectName) {
-            // 精确匹配（score >= 50）或父目录匹配（score >= 30）都可以使用 CLI
-            if matchInfo.score >= 30 {
-                // 确定用于 CLI 的路径
-                var cliPath = path
-
-                // 如果是父目录匹配（score < 50），使用 workspace 根路径
-                if matchInfo.score < 50 {
-                    if let workspacePath = extractWorkspacePath(windowTitle: matchInfo.windowName, projectPath: path) {
-                        fputs("[DEBUG] focusHostApp: parent directory match, using workspace path: \(workspacePath)\n", stderr)
-                        cliPath = workspacePath
-                    }
-                }
-
-                fputs("[DEBUG] focusHostApp: window match score=\(matchInfo.score), trying CLI with path: \(cliPath)\n", stderr)
-                if focusWindowViaCLI(bundleId: hostBundleId, projectPath: cliPath) {
-                    fputs("[DEBUG] focusHostApp: CLI command succeeded\n", stderr)
-                    return
-                }
-            } else {
-                fputs("[DEBUG] focusHostApp: match score=\(matchInfo.score) < 30, skipping CLI\n", stderr)
-            }
-        } else {
-            fputs("[DEBUG] focusHostApp: no matching window exists, skipping CLI to avoid opening new window\n", stderr)
         }
     }
 
@@ -748,14 +741,26 @@ let rawArgs = Array(CommandLine.arguments.dropFirst())
 let isLaunchServicesLaunch = rawArgs.contains(where: { $0.hasPrefix("-psn_") })
 let hasRecognizedArgs = rawArgs.contains(where: { recognizedOptions.contains($0) })
 
-// 关键修复：如果没有任何有效参数，不发送通知
-// 这防止了点击通知后系统重新激活应用时发送默认通知
+// 关键修复：LaunchServices 启动（通知点击）需要运行事件循环来接收回调
 if !hasRecognizedArgs {
-    logToFile("No recognized args, exiting without notification")
-    fputs("[DEBUG] No recognized args, exiting without notification\n", stderr)
     if isLaunchServicesLaunch {
-        // LaunchServices 启动，等待一会儿再退出
-        RunLoop.current.run(until: Date(timeIntervalSinceNow: 2))
+        // 通知点击触发的启动：运行 NSApplication 事件循环
+        logToFile("LaunchServices launch (notification click), starting event loop")
+        fputs("[DEBUG] LaunchServices launch (notification click), starting event loop\n", stderr)
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        // 10秒超时防止挂起
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            fputs("[DEBUG] LaunchServices timeout, exiting...\n", stderr)
+            exit(0)
+        }
+
+        app.run()
+    } else {
+        logToFile("No recognized args, exiting without notification")
+        fputs("[DEBUG] No recognized args, exiting without notification\n", stderr)
     }
     exit(0)
 }
