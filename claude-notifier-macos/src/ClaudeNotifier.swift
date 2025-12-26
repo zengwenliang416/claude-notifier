@@ -172,6 +172,23 @@ private func isWindowParentOfProject(windowTitle: String, projectPath: String) -
     return pathComponents.contains { $0 == windowTitle }
 }
 
+/// 从项目路径中提取 workspace 根路径
+/// 例如：windowTitle=".claude", projectPath="/Users/xxx/.claude/repos/project"
+/// 返回 "/Users/xxx/.claude"
+private func extractWorkspacePath(windowTitle: String, projectPath: String) -> String? {
+    // 在路径中查找匹配的目录名
+    let searchPattern = "/\(windowTitle)/"
+    if let range = projectPath.range(of: searchPattern) {
+        // 返回从开头到匹配目录的路径（包含该目录）
+        return String(projectPath[..<range.upperBound].dropLast())
+    }
+    // 如果路径以该目录结尾
+    if projectPath.hasSuffix("/\(windowTitle)") {
+        return projectPath
+    }
+    return nil
+}
+
 /// 计算窗口与项目的匹配分数（分数越高匹配越精确）
 private func calculateMatchScore(windowTitle: String?, document: String?, projectPath: String?, projectName: String?) -> Int {
     var score = 0
@@ -368,25 +385,6 @@ private func findBestWindowNameViaCGAPI(pid: pid_t, projectPath: String?, projec
     return scanWindowsViaCGAPI(pid: pid, projectPath: projectPath, projectName: projectName)?.windowName
 }
 
-/// 检查是否存在精确匹配项目的窗口（用于决定是否使用 CLI）
-/// 只有分数 >= 50 才认为是精确匹配（标题精确匹配或包含项目名）
-/// 分数 30（父目录匹配）不足以触发 CLI，避免打开错误目录
-private func windowExistsForProject(pid: pid_t, projectPath: String?, projectName: String?) -> Bool {
-    guard let result = scanWindowsViaCGAPI(pid: pid, projectPath: projectPath, projectName: projectName) else {
-        fputs("[DEBUG] windowExistsForProject: no windows found\n", stderr)
-        return false
-    }
-
-    let threshold = 50
-    if result.score >= threshold {
-        fputs("[DEBUG] windowExistsForProject: found matching window '\(result.windowName)' with score=\(result.score) (>= \(threshold))\n", stderr)
-        return true
-    }
-
-    fputs("[DEBUG] windowExistsForProject: best score=\(result.score) < \(threshold), not precise enough for CLI\n", stderr)
-    return false
-}
-
 /// 通过 AppleScript 使用窗口名 raise 指定窗口
 private func raiseWindowByName(appName: String, windowName: String) -> Bool {
     fputs("[DEBUG] raiseWindowByName: app=\(appName), window=\(windowName)\n", stderr)
@@ -502,12 +500,28 @@ private func focusHostApp(hostBundleId: String, projectPath: String?, projectNam
     // 重要：只有当窗口确实存在（但在其他 Space）时才使用 CLI
     // 避免打开不存在的项目窗口
     if let path = projectPath, !path.isEmpty {
-        // 先检查是否存在匹配的窗口
-        if windowExistsForProject(pid: app.processIdentifier, projectPath: projectPath, projectName: projectName) {
-            fputs("[DEBUG] focusHostApp: window exists, trying CLI command...\n", stderr)
-            if focusWindowViaCLI(bundleId: hostBundleId, projectPath: path) {
-                fputs("[DEBUG] focusHostApp: CLI command succeeded\n", stderr)
-                return
+        // 获取窗口匹配信息
+        if let matchInfo = scanWindowsViaCGAPI(pid: app.processIdentifier, projectPath: projectPath, projectName: projectName) {
+            // 精确匹配（score >= 50）或父目录匹配（score >= 30）都可以使用 CLI
+            if matchInfo.score >= 30 {
+                // 确定用于 CLI 的路径
+                var cliPath = path
+
+                // 如果是父目录匹配（score < 50），使用 workspace 根路径
+                if matchInfo.score < 50 {
+                    if let workspacePath = extractWorkspacePath(windowTitle: matchInfo.windowName, projectPath: path) {
+                        fputs("[DEBUG] focusHostApp: parent directory match, using workspace path: \(workspacePath)\n", stderr)
+                        cliPath = workspacePath
+                    }
+                }
+
+                fputs("[DEBUG] focusHostApp: window match score=\(matchInfo.score), trying CLI with path: \(cliPath)\n", stderr)
+                if focusWindowViaCLI(bundleId: hostBundleId, projectPath: cliPath) {
+                    fputs("[DEBUG] focusHostApp: CLI command succeeded\n", stderr)
+                    return
+                }
+            } else {
+                fputs("[DEBUG] focusHostApp: match score=\(matchInfo.score) < 30, skipping CLI\n", stderr)
             }
         } else {
             fputs("[DEBUG] focusHostApp: no matching window exists, skipping CLI to avoid opening new window\n", stderr)

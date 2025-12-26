@@ -28,14 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **默认安装路径**：改为 `/Applications`，移除 `~/.claude/apps` 支持
 - **窗口匹配逻辑优化**：
-  - 新增 `windowExistsForProject` 函数检查窗口匹配分数
-  - CLI 触发阈值提高到 >= 50，避免父目录匹配（分数 30）误触发
+  - 支持 Zed workspace 场景：当窗口标题是项目的父目录时，自动提取 workspace 路径用于 CLI
+  - CLI 触发阈值降至 >= 30，支持父目录匹配场景
+  - 新增 `extractWorkspacePath` 函数从项目路径提取 workspace 根路径
   - 无匹配窗口时不再回退 raise 第一个窗口
 
 ### Fixed
 
+- 修复 Zed workspace 场景下点击通知无法跳转的问题（窗口标题显示 workspace 根目录而非项目名）
 - 修复 Zed 多窗口场景下跳转到错误窗口的问题
 - 修复点击通知后打开新窗口而非聚焦现有窗口的问题
+- 修复 CLI 命令双重引号导致路径解析错误的问题（配置模板不再需要手动加引号）
 - 修复 `--no-sound` 参数无效的问题（静音模式现在正常工作）
 
 ### Security
